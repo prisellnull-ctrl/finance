@@ -23,6 +23,19 @@
     "Прочее",
   ];
 
+  const DEFAULT_PRODUCTS = [
+    "Выпечка",
+    "Молочные",
+    "Мясо и рыба",
+    "Овощи и фрукты",
+    "Бакалея",
+    "Сладости",
+    "Напитки",
+    "Готовая еда",
+    "Бытовое",
+    "Прочее",
+  ];
+
   const INTERVALS = [
     { id: "monthly", label: "Ежемесячно", div: 1 },
     { id: "quarterly", label: "Раз в квартал", div: 3 },
@@ -77,6 +90,7 @@
         dailyLimit: 500,
         pin: "",
         categories: [...DEFAULT_CATS],
+        productCategories: [...DEFAULT_PRODUCTS],
         onboarded: false,
       },
       daily: {
@@ -109,7 +123,7 @@
       if (!raw) return blank();
       const s = JSON.parse(raw);
       const b = blank();
-      return {
+      const merged = {
         ...b,
         ...s,
         settings: { ...b.settings, ...(s.settings || {}) },
@@ -121,6 +135,13 @@
           debt: s.cards?.debt || [],
         },
       };
+      if (!merged.settings.productCategories?.length) {
+        merged.settings.productCategories = [...DEFAULT_PRODUCTS];
+      }
+      if (!merged.settings.categories?.length) {
+        merged.settings.categories = [...DEFAULT_CATS];
+      }
+      return merged;
     } catch {
       return blank();
     }
@@ -556,7 +577,7 @@
     const kind = isIn ? (INCOME[tx.kind]?.label || "") : "";
     const sub = isIn
       ? `${tx.date}${kind ? " · " + kind : ""}`
-      : `${tx.date} · ${tx.category || ""}${tx.items?.length > 1 ? " · " + tx.items.length + " поз." : ""}`;
+      : `${tx.date} · ${tx.category || ""}${tx.items?.length ? " · " + tx.items.map((i) => i.name).filter(Boolean).slice(0, 2).join(", ") : ""}${tx.items?.length > 2 ? "…" : ""}`;
     return `<div class="row-swipe" data-id="${tx.id}">
       <div class="behind">Удалить</div>
       <div class="hist-item swipe-inner">
@@ -681,16 +702,26 @@
       return `<div class="${cls}" title="${x.d}: ${fmt(x.s)}"><i style="height:${h}%"></i></div>`;
     }).join("");
 
-    const catMap = {};
+    const groups = {};
     state.transactions.filter((t) => t.type === "expense" && t.date.startsWith(monthKey())).forEach((t) => {
-      const key = t.category || "Прочее";
-      catMap[key] = (catMap[key] || 0) + t.amount;
+      const op = t.category || "Прочее";
+      if (!groups[op]) groups[op] = { total: 0, products: {} };
+      groups[op].total += t.amount;
+      (t.items && t.items.length ? t.items : [{ amount: t.amount, product: "Прочее" }]).forEach((it) => {
+        const p = it.product || "Прочее";
+        groups[op].products[p] = (groups[op].products[p] || 0) + Number(it.amount || 0);
+      });
     });
-    const cats = Object.entries(catMap).sort((a, b) => b[1] - a[1]);
-    const catSum = cats.reduce((s, c) => s + c[1], 0) || 1;
-    const catHtml = cats.length
-      ? cats.map(([n, v]) => `<div class="alloc-row"><span>${esc(n)}</span><span>${fmt(v)} ₽</span></div>
-          <div class="cat-bar"><i style="width:${(v / catSum) * 100}%"></i></div>`).join("")
+    const catSum = Object.values(groups).reduce((s, g) => s + g.total, 0) || 1;
+    const catHtml = Object.keys(groups).length
+      ? Object.entries(groups).sort((a, b) => b[1].total - a[1].total).map(([n, g]) => {
+          const prods = Object.entries(g.products).sort((a, b) => b[1] - a[1]);
+          return `<div class="alloc-group">
+            <div class="alloc-row"><span>${esc(n)}</span><span>${fmt(g.total)} ₽</span></div>
+            <div class="cat-bar"><i style="width:${(g.total / catSum) * 100}%"></i></div>
+            ${prods.map(([p, v]) => `<div class="alloc-sub"><span>${esc(p)}</span><span>${fmt(v)} ₽</span></div>`).join("")}
+          </div>`;
+        }).join("")
       : `<div class="empty">Нет трат за месяц.</div>`;
 
     const monthAlloc = state.allocations.filter((a) => (a.date || "").startsWith(monthKey()));
@@ -723,7 +754,7 @@
       <div class="chart-card">
         <div class="hero-label">Куда ушли поступления</div>
         <div class="alloc-row"><span>Дневной пул</span><span>${fmt(sum("home"))} ₽</span></div>
-        <div class="alloc-row"><span>Прочее / долги</span><span>${fmt(sum("debt"))} ₽</span></div>
+        <div class="alloc-row"><span>Прочее</span><span>${fmt(sum("debt"))} ₽</span></div>
         <div class="alloc-row"><span>Обязательно</span><span>${fmt(mustSum)} ₽</span></div>
         <div class="alloc-row"><span>Копилка</span><span>${fmt(pigSum)} ₽</span></div>
         <div class="alloc-row"><span>Остаток</span><span>${fmt(sum("leftover"))} ₽</span></div>
@@ -733,7 +764,7 @@
         ${cardRows}
       </div>
       <div class="chart-card">
-        <div class="hero-label">Категории трат</div>
+        <div class="hero-label">Траты по местам и товарам</div>
         ${catHtml}
       </div>
     `;
@@ -787,42 +818,43 @@
 
   function sheetExpense() {
     overlayMode = "expense";
-    const opts = state.settings.categories.map((c) => `<option value="${esc(c)}">${esc(c)}</option>`).join("");
+    const opOpts = (state.settings.categories || DEFAULT_CATS).map((c) => `<option value="${esc(c)}">${esc(c)}</option>`).join("");
+    const prOpts = (state.settings.productCategories || DEFAULT_PRODUCTS).map((c) => `<option value="${esc(c)}">${esc(c)}</option>`).join("");
     openOverlay(`
       <div class="sheet">
         <div class="grab"></div>
         <h3>Трата</h3>
-        <div class="field"><label>Категория операции</label>
-          <select id="exCat">${opts}</select>
+        <div class="field"><label>Где потрачено</label>
+          <select id="exCat">${opOpts}</select>
         </div>
-        <div class="field"><label>Позиции</label>
+        <div class="field"><label>Товары</label>
           <div class="items" id="exItems"></div>
           <button class="add-card" id="exAdd" style="margin-top:8px">+ Товар</button>
         </div>
         <button class="btn btn-gold btn-block" id="exSave">Списать</button>
       </div>`);
     const box = $("#exItems");
-    const addRow = (name = "", cat = state.settings.categories[0], amt = "") => {
+    const addRow = (name = "", product = (state.settings.productCategories || DEFAULT_PRODUCTS)[0], amt = "") => {
       const row = document.createElement("div");
-      row.className = "item-row";
+      row.className = "item-row item-row-prod";
       row.innerHTML = `
-        <input class="nm" placeholder="Название" value="${esc(name)}" />
+        <input class="nm" placeholder="Название товара" value="${esc(name)}" />
+        <select class="ct">${prOpts}</select>
         <input class="am" type="number" inputmode="decimal" min="0" step="0.01" placeholder="Сумма" value="${esc(amt)}" />
-        <button class="x" type="button">×</button>
-        <select class="ct" style="grid-column:1/-1">${opts}</select>`;
-      row.querySelector(".ct").value = cat;
+        <button class="x" type="button">×</button>`;
+      row.querySelector(".ct").value = product;
       row.querySelector(".x").onclick = () => {
         if (box.children.length > 1) row.remove();
       };
       box.appendChild(row);
     };
     addRow();
-    $("#exAdd").onclick = () => addRow("", $("#exCat").value);
+    $("#exAdd").onclick = () => addRow();
     $("#exSave").onclick = debounceClick(() => {
       const items = $$(".item-row", box).map((r) => ({
         name: r.querySelector(".nm").value.trim(),
         amount: Number(r.querySelector(".am").value),
-        category: r.querySelector(".ct").value,
+        product: r.querySelector(".ct").value,
       }));
       if (!items.some((i) => i.name && i.amount > 0)) return toast("Нужно название и сумма");
       if (items.some((i) => i.amount > 0 && !i.name)) return toast("Название товара обязательно");
@@ -974,25 +1006,34 @@
         <div class="field"><label>PIN вкладки «Прочее» (4 цифры, пусто — без пароля)</label>
           <input id="sPin" inputmode="numeric" maxlength="4" placeholder="${state.settings.pin ? "••••" : "не задан"}" />
         </div>
-        <div class="field"><label>Категории трат</label>
+        <div class="field"><label>Категории трат (где потрачено)</label>
           <div class="items" id="sCats"></div>
-          <button class="add-card" id="sAddCat" style="margin-top:8px">+ Категория</button>
+          <button class="add-card" id="sAddCat" style="margin-top:8px">+ Категория трат</button>
+        </div>
+        <div class="field"><label>Категории товаров</label>
+          <div class="items" id="sProds"></div>
+          <button class="add-card" id="sAddProd" style="margin-top:8px">+ Категория товара</button>
         </div>
         <button class="btn btn-gold btn-block" id="sSave">Сохранить</button>
         <button class="btn btn-ghost btn-block" id="sDemo" style="margin-top:8px">Заполнить демо-данными</button>
         <button class="btn btn-ghost btn-block" id="sReset" style="margin-top:8px">Сбросить всё</button>
       </div>`);
-    const box = $("#sCats");
-    const addCat = (v = "") => {
-      const r = document.createElement("div");
-      r.className = "item-row";
-      r.style.gridTemplateColumns = "1fr 36px";
-      r.innerHTML = `<input class="nm" value="${esc(v)}" /><button class="x">×</button>`;
-      r.querySelector(".x").onclick = () => r.remove();
-      box.appendChild(r);
+    const bindList = (box, values) => {
+      const add = (v = "") => {
+        const r = document.createElement("div");
+        r.className = "item-row";
+        r.style.gridTemplateColumns = "1fr 36px";
+        r.innerHTML = `<input class="nm" value="${esc(v)}" /><button class="x">×</button>`;
+        r.querySelector(".x").onclick = () => r.remove();
+        box.appendChild(r);
+      };
+      values.forEach(add);
+      return add;
     };
-    state.settings.categories.forEach(addCat);
+    const addCat = bindList($("#sCats"), state.settings.categories || DEFAULT_CATS);
+    const addProd = bindList($("#sProds"), state.settings.productCategories || DEFAULT_PRODUCTS);
     $("#sAddCat").onclick = () => addCat("");
+    $("#sAddProd").onclick = () => addProd("");
     $("#sSave").onclick = debounceClick(() => {
       const lim = Number($("#sLim").value);
       if (!lim || lim < 0) return toast("Лимит должен быть больше 0");
@@ -1007,7 +1048,9 @@
         sessionStorage.removeItem(SESSION_PIN);
       }
       const cats = $$("#sCats .nm").map((i) => i.value.trim()).filter(Boolean);
+      const prods = $$("#sProds .nm").map((i) => i.value.trim()).filter(Boolean);
       if (cats.length) state.settings.categories = cats;
+      if (prods.length) state.settings.productCategories = prods;
       const oldBase = Number($("#sLim").getAttribute("value")) || state.settings.dailyLimit;
       const carry = state.daily.limitToday - oldBase;
       state.daily.limitToday = lim + carry;
@@ -1044,16 +1087,11 @@
     addExpense({
       category: "Покупки в магазине",
       title: "Покупки в магазине",
-      items: [{ name: "Продукты", amount: 420, category: "Покупки в магазине" }],
+      items: [{ name: "Хлеб", amount: 420, product: "Выпечка" }],
     });
   }
 
   /* ---------- pin ---------- */
-  function isOtherUnlocked() {
-    if (!state.settings.pin) return true;
-    return sessionStorage.getItem(SESSION_PIN) === "1";
-  }
-
   function askPin(onOk) {
     let buf = "";
     openOverlay(`
@@ -1079,7 +1117,6 @@
         draw();
         if (buf.length === 4) {
           if (buf === state.settings.pin) {
-            sessionStorage.setItem(SESSION_PIN, "1");
             closeOverlay();
             onOk();
           } else {
@@ -1093,15 +1130,19 @@
   }
 
   /* ---------- nav ---------- */
-  function showTab(name) {
-    if (name === "other" && !isOtherUnlocked()) {
-      askPin(() => showTab("other"));
-      return;
-    }
+  function applyTab(name) {
     currentTab = name;
     $$(".view").forEach((v) => v.classList.toggle("active", v.dataset.view === name));
     $$(".tab").forEach((t) => t.classList.toggle("active", t.dataset.tab === name));
     if (name === "stats") renderStats();
+  }
+
+  function showTab(name) {
+    if (name === "other" && name !== currentTab && state.settings.pin) {
+      askPin(() => applyTab("other"));
+      return;
+    }
+    applyTab(name);
   }
 
   /* ---------- first run ---------- */
