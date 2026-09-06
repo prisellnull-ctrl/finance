@@ -1,4 +1,4 @@
-const CACHE = "limit-v2";
+const CACHE = "limit-v3";
 const ASSETS = [
   "./",
   "./index.html",
