@@ -414,14 +414,14 @@
     ov.onclick = (e) => { if (e.target === ov) closeOverlay(); };
   }
 
-  function confirmDlg(title, text, onYes) {
+  function confirmDlg(title, text, onYes, yesLabel) {
     openOverlay(`
       <div class="confirm-box">
         <h3>${esc(title)}</h3>
         <p>${esc(text)}</p>
         <div class="row-btns">
           <button class="btn btn-ghost" id="cNo">Отмена</button>
-          <button class="btn btn-danger" id="cYes">Удалить</button>
+          <button class="btn btn-danger" id="cYes">${esc(yesLabel || "Удалить")}</button>
         </div>
       </div>`);
     $("#cNo").onclick = closeOverlay;
@@ -1015,7 +1015,11 @@
           <button class="add-card" id="sAddProd" style="margin-top:8px">+ Категория товара</button>
         </div>
         <button class="btn btn-gold btn-block" id="sSave">Сохранить</button>
-        <button class="btn btn-ghost btn-block" id="sDemo" style="margin-top:8px">Заполнить демо-данными</button>
+        <div class="row-btns" style="margin-top:8px">
+          <button class="btn btn-ghost" id="sExport">Выгрузить JSON</button>
+          <button class="btn btn-ghost" id="sImport">Загрузить JSON</button>
+        </div>
+        <input id="sImportFile" type="file" accept="application/json,.json" class="hidden" />
         <button class="btn btn-ghost btn-block" id="sReset" style="margin-top:8px">Сбросить всё</button>
       </div>`);
     const bindList = (box, values) => {
@@ -1062,33 +1066,77 @@
     $("#sReset").onclick = () => confirmDlg("Сбросить данные?", "Все записи и карточки будут удалены.", () => {
       state = blank();
       save();
-      sessionStorage.removeItem(SESSION_PIN);
       closeOverlay();
       render();
     });
-    $("#sDemo").onclick = debounceClick(() => { seedDemo(); closeOverlay(); render(); toast("Демо загружено"); });
+    $("#sExport").onclick = debounceClick(exportBackup);
+    $("#sImport").onclick = () => $("#sImportFile").click();
+    $("#sImportFile").onchange = () => {
+      const file = $("#sImportFile").files && $("#sImportFile").files[0];
+      $("#sImportFile").value = "";
+      if (!file) return;
+      const reader = new FileReader();
+      reader.onload = () => {
+        try {
+          const data = JSON.parse(reader.result);
+          if (!data || typeof data !== "object" || !data.settings) {
+            toast("Это не резервная копия ЛИМИТ");
+            return;
+          }
+          confirmDlg("Загрузить копию?", "Текущие данные будут заменены файлом.", () => {
+            applyBackup(data);
+            closeOverlay();
+            render();
+            toast("Данные восстановлены");
+          }, "Загрузить");
+        } catch {
+          toast("Файл повреждён или это не JSON");
+        }
+      };
+      reader.readAsText(file, "utf-8");
+    };
   }
 
-  function seedDemo() {
-    const t = todayISO();
-    state.cards.must = [
-      { id: uid(), name: "Отпуск", mode: "amount", target: 30000, percent: 0, interval: "yearly", visible: true, balance: 0 },
-      { id: uid(), name: "Налог", mode: "amount", target: 12000, percent: 0, interval: "quarterly", visible: true, balance: 0 },
-    ];
-    state.cards.piggy = [
-      { id: uid(), name: "Подушка", percent: 70, visible: true, balance: 0 },
-      { id: uid(), name: "Хобби", percent: 30, visible: true, balance: 0 },
-    ];
-    state.cards.debt = [
-      { id: uid(), name: "Кредит авто", kind: "credit", monthlyPayment: 18000, totalDebt: 240000, priority: 1, paid: 0, balance: 0 },
-      { id: uid(), name: "Карта банка", kind: "card", monthlyPayment: 5000, totalDebt: 35000, priority: 2, paid: 0, balance: 0 },
-    ];
-    addIncome({ amount: 100000, kind: "salary", title: "Зарплата" });
-    addExpense({
-      category: "Покупки в магазине",
-      title: "Покупки в магазине",
-      items: [{ name: "Хлеб", amount: 420, product: "Выпечка" }],
-    });
+  function exportBackup() {
+    const payload = {
+      app: "ЛИМИТ",
+      version: 2,
+      exportedAt: new Date().toISOString(),
+      data: state,
+    };
+    const blob = new Blob([JSON.stringify(payload, null, 2)], { type: "application/json" });
+    const a = document.createElement("a");
+    a.href = URL.createObjectURL(blob);
+    a.download = `limit-backup-${todayISO()}.json`;
+    a.click();
+    setTimeout(() => URL.revokeObjectURL(a.href), 1500);
+    toast("Файл копии скачан");
+  }
+
+  function applyBackup(payload) {
+    const raw = payload.data && payload.data.settings ? payload.data : payload;
+    const b = blank();
+    state = {
+      ...b,
+      ...raw,
+      settings: { ...b.settings, ...(raw.settings || {}) },
+      daily: { ...b.daily, ...(raw.daily || {}) },
+      month: { ...b.month, ...(raw.month || {}) },
+      cards: {
+        must: raw.cards?.must || [],
+        piggy: raw.cards?.piggy || [],
+        debt: raw.cards?.debt || [],
+      },
+      transactions: raw.transactions || [],
+      allocations: raw.allocations || [],
+      dailyLog: raw.dailyLog || {},
+      unallocated: raw.unallocated || 0,
+    };
+    if (!state.settings.productCategories?.length) {
+      state.settings.productCategories = [...DEFAULT_PRODUCTS];
+    }
+    save();
+    rollCalendar();
   }
 
   /* ---------- pin ---------- */
