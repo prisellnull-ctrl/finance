@@ -19,6 +19,7 @@
   --radius: 16px;
   --radius-sm: 10px;
   --nav-h: 72px;
+  --safe-t: env(safe-area-inset-top, 0px);
   --safe-b: env(safe-area-inset-bottom, 0px);
   --font: "Outfit", "Segoe UI", system-ui, sans-serif;
   --serif: "Fraunces", "Iowan Old Style", Georgia, serif;
@@ -58,7 +59,7 @@ img { display: block; max-width: 100%; }
   display: flex;
   align-items: center;
   justify-content: space-between;
-  padding: 14px 18px 8px;
+  padding: calc(var(--safe-t) + 18px) 18px 14px;
   flex-shrink: 0;
 }
 .brand {
@@ -102,7 +103,7 @@ main.views {
   inset: 0;
   overflow-y: auto;
   overflow-x: hidden;
-  padding: 6px 16px calc(var(--nav-h) + var(--safe-b) + 12px);
+  padding: 10px 16px calc(var(--nav-h) + var(--safe-b) + 16px);
   -webkit-overflow-scrolling: touch;
   opacity: 0;
   transform: translateY(8px);
