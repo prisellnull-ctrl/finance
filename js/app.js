@@ -104,6 +104,7 @@
         pool: 0,
       },
       unallocated: 0,
+      otherPool: 0,
       transactions: [],
       allocations: [],
       dailyLog: {}, // iso -> {limit, spent}
@@ -141,6 +142,10 @@
       if (!merged.settings.categories?.length) {
         merged.settings.categories = [...DEFAULT_CATS];
       }
+      if (merged.otherPool == null) merged.otherPool = 0;
+      (merged.cards.piggy || []).forEach((c) => {
+        if (c.priority == null) c.priority = 3;
+      });
       return merged;
     } catch {
       return blank();
@@ -234,7 +239,7 @@
       const need = debtNeed();
       const toDebt = Math.min(half, need, rest);
       if (toDebt > 0) {
-        fillDebts(toDebt);
+        state.otherPool = (state.otherPool || 0) + toDebt;
         report.debt = toDebt;
         rest -= toDebt;
       }
@@ -267,15 +272,21 @@
     if (rest > 0) {
       const vis = state.cards.piggy.filter((c) => c.visible !== false);
       if (vis.length) {
-        const weights = vis.map((c) => Math.max(0, Number(c.percent) || 0));
-        const sw = weights.reduce((a, b) => a + b, 0) || vis.length;
+        const ranked = vis.map((c) => ({
+          c,
+          p: clamp(Number(c.priority) || 3, 1, 5),
+        })).sort((a, b) => b.p - a.p);
+        const sumP = ranked.reduce((s, x) => s + x.p, 0) || ranked.length;
         let used = 0;
-        vis.forEach((c, i) => {
-          const w = (sw ? (weights[i] || 0) : 1) / sw;
-          const give = Math.round(rest * w * 100) / 100;
-          c.balance = (c.balance || 0) + give;
-          report.piggy.push({ id: c.id, name: c.name, amount: give });
-          used += give;
+        ranked.forEach((x, i) => {
+          const give = i === ranked.length - 1
+            ? Math.round((rest - used) * 100) / 100
+            : Math.round(((rest * x.p) / sumP) * 100) / 100;
+          if (give > 0) {
+            x.c.balance = (x.c.balance || 0) + give;
+            report.piggy.push({ id: x.c.id, name: x.c.name, amount: give });
+            used += give;
+          }
         });
         rest -= used;
       }
@@ -288,25 +299,6 @@
     state.allocations.unshift(report);
     save();
     return report;
-  }
-
-  function fillDebts(amount) {
-    const cards = [...state.cards.debt].sort((a, b) => (a.priority || 5) - (b.priority || 5));
-    let left = amount;
-    cards.forEach((c) => {
-      if (left <= 0) return;
-      let need;
-      if (c.totalDebt && c.totalDebt > 0) need = Math.max(0, c.totalDebt - (c.paid || 0));
-      else need = Math.max(0, Number(c.monthlyPayment) || 0);
-      const give = Math.min(need, left);
-      c.paid = (c.paid || 0) + give;
-      c.balance = (c.balance || 0) + give;
-      left -= give;
-    });
-    if (left > 0 && cards.length) {
-      cards[0].balance += left;
-      cards[0].paid = (cards[0].paid || 0) + left;
-    }
   }
 
   function addIncome({ amount, kind, title }) {
@@ -375,11 +367,27 @@
     amount = Number(amount) || 0;
     if (amount <= 0 || fromId === toId) return false;
     const list = state.cards[tab];
+    const b = toId === "__pool__" ? null : list.find((c) => c.id === toId);
+    if (fromId === "__pool__") {
+      if (tab !== "debt" || (state.otherPool || 0) < amount || !b) return false;
+      state.otherPool -= amount;
+      b.balance = (b.balance || 0) + amount;
+      b.paid = (b.paid || 0) + amount;
+      save();
+      return true;
+    }
     const a = list.find((c) => c.id === fromId);
-    const b = list.find((c) => c.id === toId);
-    if (!a || !b || (a.balance || 0) < amount) return false;
+    if (!a || (a.balance || 0) < amount) return false;
     a.balance -= amount;
-    b.balance = (b.balance || 0) + amount;
+    if (toId === "__pool__" && tab === "debt") {
+      state.otherPool = (state.otherPool || 0) + amount;
+      a.paid = Math.max(0, (a.paid || 0) - amount);
+    } else if (b) {
+      b.balance = (b.balance || 0) + amount;
+    } else {
+      a.balance += amount;
+      return false;
+    }
     save();
     return true;
   }
@@ -602,7 +610,7 @@
         ? `${c.percent || 0}% от поступления · ${labelInterval(c.interval)}`
         : `${fmt(c.target || 0)} ₽ · ${labelInterval(c.interval)}`;
     } else if (tab === "piggy") {
-      meta = `${c.percent || 0}% распределения`;
+      meta = `приоритет ${c.priority || 3}`;
     } else {
       const left = c.totalDebt ? Math.max(0, c.totalDebt - (c.paid || 0)) : null;
       meta = [
@@ -617,7 +625,7 @@
         ${img}
         <div class="card-body">
           <div class="name">${esc(c.name)} ${hide ? `<span class="ghost-tag">скрыта</span>` : ""}
-            ${tab === "debt" ? `<span class="prio">P${c.priority || 3}</span>` : ""}</div>
+            ${tab === "debt" || tab === "piggy" ? `<span class="prio">P${c.priority || 3}</span>` : ""}</div>
           <div class="meta">${esc(meta)}</div>
           <div class="bal">${fmt(c.balance || 0)} ₽</div>
         </div>
@@ -659,9 +667,10 @@
     const load = total > 0 ? clamp((need / total) * 100, 0, 100) : (need > 0 ? 50 : 0);
     $("#view-other").innerHTML = `
       <div class="debt-scale">
-        <div class="top"><span>Долговая нагрузка</span><span>${fmt(need)} ₽</span></div>
+        <div class="top"><span>Баланс вкладки</span><span>${fmt(state.otherPool || 0)} ₽</span></div>
+        <div class="top" style="margin-top:8px"><span>Долговая нагрузка</span><span>${fmt(need)} ₽</span></div>
         <div class="scale-track"><i style="width:${load}%"></i></div>
-        <div class="top" style="margin-top:8px"><span>Погашено</span><span>${fmt(paid)} ₽</span></div>
+        <div class="top" style="margin-top:8px"><span>Разнесено по карточкам</span><span>${fmt(paid)} ₽</span></div>
       </div>
       <div class="section-h"><h2>Обязательства</h2><span>${list.length}</span></div>
       ${list.length ? list.map((c) => cardBlock(c, "debt")).join("") : `<div class="empty">Нет обязательств.</div>`}
@@ -888,7 +897,9 @@
             <select id="cInt">${INTERVALS.map((i) => `<option value="${i.id}" ${c.interval===i.id?"selected":""}>${i.label}</option>`).join("")}</select>
           </div>` : ""}
         ${tab === "piggy" ? `
-          <div class="field"><label>Процент распределения</label><input id="cPct" type="number" value="${esc(c.percent || "")}" min="0" max="100" /></div>` : ""}
+          <div class="field"><label>Приоритет накопления</label>
+            <div class="prio-seg" id="cPrio">${[1,2,3,4,5].map((n) => `<button data-p="${n}" class="${(c.priority||3)===n?"on":""}">${n}</button>`).join("")}</div>
+          </div>` : ""}
         ${tab === "debt" ? `
           <div class="field"><label>Категория</label>
             <div class="seg" id="cKind">
@@ -953,7 +964,7 @@
         card.percent = Number($("#cPct")?.value) || 0;
         card.interval = $("#cInt").value;
       }
-      if (tab === "piggy") card.percent = Number($("#cPct").value) || 0;
+      if (tab === "piggy") card.priority = prio;
       if (tab === "debt") {
         card.kind = kind;
         card.monthlyPayment = Number($("#cPay").value) || 0;
@@ -973,18 +984,24 @@
     const card = list.find((c) => c.id === id);
     if (!card) return;
     const others = list.filter((c) => c.id !== id);
+    const poolOpt = tab === "debt"
+      ? `<option value="__pool__">Баланс вкладки · ${fmt(state.otherPool || 0)} ₽</option>`
+      : "";
+    const sources = poolOpt + others.map((o) => `<option value="${o.id}">${esc(o.name)} · ${fmt(o.balance||0)} ₽</option>`).join("");
+    const canMove = tab === "debt" || others.length;
     openOverlay(`
       <div class="sheet">
         <div class="grab"></div>
         <h3>${esc(card.name)}</h3>
-        <p style="color:var(--text-dim);margin-bottom:14px">Баланс ${fmt(card.balance || 0)} ₽</p>
-        ${others.length ? `
-          <div class="field"><label>Перебросить с карточки этой вкладки</label>
-            <select id="trFrom">${others.map((o) => `<option value="${o.id}">${esc(o.name)} · ${fmt(o.balance||0)} ₽</option>`).join("")}</select>
+        <p style="color:var(--text-dim);margin-bottom:14px">Баланс карточки ${fmt(card.balance || 0)} ₽</p>
+        ${canMove ? `
+          <div class="field"><label>Откуда перебросить</label>
+            <select id="trFrom">${sources}</select>
           </div>
           <div class="field"><label>Сумма</label><input id="trAmt" type="number" inputmode="decimal" /></div>
-          <button class="btn btn-gold btn-block" id="trGo">Перебросить</button>
-        ` : `<div class="empty">Нет других карточек для перевода</div>`}
+          <button class="btn btn-gold btn-block" id="trGo">На эту карточку</button>
+          ${tab === "debt" && (card.balance || 0) > 0 ? `<button class="btn btn-ghost btn-block" id="trBack" style="margin-top:8px">Вернуть на баланс вкладки</button>` : ""}
+        ` : `<div class="empty">Нет источников для перевода</div>`}
         <button class="btn btn-ghost btn-block" id="trEdit" style="margin-top:8px">Изменить карточку</button>
       </div>`);
     $("#trGo")?.addEventListener("click", debounceClick(() => {
@@ -993,6 +1010,14 @@
       closeOverlay();
       render();
       toast("Сумма переведена");
+    }));
+    $("#trBack")?.addEventListener("click", debounceClick(() => {
+      const amt = Number($("#trAmt").value) || card.balance || 0;
+      const ok = transfer(tab, id, "__pool__", amt);
+      if (!ok) return toast("Недостаточно средств на карточке");
+      closeOverlay();
+      render();
+      toast("Вернули на баланс вкладки");
     }));
     $("#trEdit").onclick = () => sheetCard(tab, card);
   }
@@ -1131,6 +1156,7 @@
       allocations: raw.allocations || [],
       dailyLog: raw.dailyLog || {},
       unallocated: raw.unallocated || 0,
+      otherPool: raw.otherPool || 0,
     };
     if (!state.settings.productCategories?.length) {
       state.settings.productCategories = [...DEFAULT_PRODUCTS];
